@@ -453,6 +453,47 @@ func TestDocumentStep_ChangesWithEmptySummaryStillFails(t *testing.T) {
 	}
 }
 
+// TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails
+// covers the review-bot finding: an agent that commits its own edits leaves a
+// clean worktree, so the pipeline commits nothing and committed would be
+// false even though the head advanced. Head movement counts as changes, so
+// the pass must not read as a no-op.
+func TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Self committed\n"), 0o644)
+			gitCmd(t, dir, "add", "README.md")
+			gitCmd(t, dir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "docs: update README")
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary after the agent committed its own edits", err)
+	}
+	// The agent's own commit must remain on the branch.
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
+		t.Fatal("expected the agent's self-commit to remain on the branch")
+	}
+	if got := lastCommitMessage(t, dir); got != "docs: update README" {
+		t.Fatalf("last commit message = %q, want the agent's own commit", got)
+	}
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("expected clean worktree, got %q", status)
+	}
+	// The run head must have followed the agent's commit.
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("expected sctx.Run.HeadSHA to advance to the agent's commit")
+	}
+}
+
 func TestDocumentStep_MalformedOutput_CommitsAndFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
