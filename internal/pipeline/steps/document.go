@@ -165,7 +165,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	var findings Findings
 	if result.Output == nil {
 		return nil, fmt.Errorf("document analyzer returned no structured findings")
-	} else if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
+	} else if err := validateDocumentAnalyzerFindings(result.Output, &findings, committed); err != nil {
 		return nil, fmt.Errorf("validate document analyzer findings: %w", err)
 	}
 
@@ -194,6 +194,22 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		Findings:      string(findingsJSON),
 		FixSummary:    fixResultSummary(committed),
 	}, nil
+}
+
+// validateDocumentAnalyzerFindings parses the document pass's structured
+// output. A pass that reports no unresolved findings and left nothing to
+// commit is a legitimate no-op, so its (present) summary may be empty.
+// Whenever the agent reports unresolved findings or actually edited files,
+// the summary is still required so the outcome names what remains or what
+// was done; an absent summary field stays a shape violation in every case.
+func validateDocumentAnalyzerFindings(raw []byte, findings *Findings, changesCommitted bool) error {
+	if err := unmarshalRequiredFindings(raw, findings, false); err != nil {
+		return err
+	}
+	if strings.TrimSpace(findings.Summary) == "" && (len(findings.Items) > 0 || changesCommitted) {
+		return fmt.Errorf("missing summary")
+	}
+	return nil
 }
 
 // buildPrompt assembles the document (or combined document+lint) prompt: the
